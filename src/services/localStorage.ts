@@ -89,23 +89,81 @@ export const saveSenderProfile = (profile: SenderProfile): void => {
 
 export const getAddressBook = (): SavedRecipient[] => {
   const storage = getStorage();
-  return storage.addressBook;
+  const original = storage.addressBook || [];
+  const deduped = dedupeAddressBook(original);
+
+  // If we cleaned anything up, persist the cleaned list so it stays clean
+  if (deduped.length !== original.length) {
+    storage.addressBook = deduped;
+    saveStorage(storage);
+  }
+
+  // Return sorted by lastUsed DESC (most recently used first) for nicer UX
+  return [...deduped].sort((a, b) =>
+    (b.lastUsed || '').localeCompare(a.lastUsed || '')
+  );
+};
+
+// Normalize destination + address into a stable dedup key
+const recipientKey = (destination: string, shippingAddress: string): string => {
+  const normalize = (s: string) =>
+    (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return `${normalize(destination)}|${normalize(shippingAddress)}`;
+};
+
+// Remove duplicate recipients (same destination + address), keeping the most recently used one
+export const dedupeAddressBook = (recipients: SavedRecipient[]): SavedRecipient[] => {
+  const byKey = new Map<string, SavedRecipient>();
+  // Sort by lastUsed DESC so we keep the most recent entry per key
+  const sorted = [...recipients].sort((a, b) =>
+    (b.lastUsed || '').localeCompare(a.lastUsed || '')
+  );
+  for (const r of sorted) {
+    const key = recipientKey(r.destination, r.shippingAddress);
+    if (!key || key === '|') continue; // skip empties
+    if (!byKey.has(key)) {
+      byKey.set(key, r);
+    }
+  }
+  return Array.from(byKey.values());
 };
 
 export const saveRecipient = (recipient: SavedRecipient): void => {
   const storage = getStorage();
-  const existingIndex = storage.addressBook.findIndex((r) => r.id === recipient.id);
+  const key = recipientKey(recipient.destination, recipient.shippingAddress);
 
-  const updatedRecipient: SavedRecipient = {
-    ...recipient,
-    lastUsed: new Date().toISOString(),
-  };
+  // If destination + address are empty, ignore
+  if (!key || key === '|') {
+    return;
+  }
+
+  const existingIndex = storage.addressBook.findIndex(
+    (r) => recipientKey(r.destination, r.shippingAddress) === key
+  );
+
+  const now = new Date().toISOString();
 
   if (existingIndex >= 0) {
-    storage.addressBook[existingIndex] = updatedRecipient;
+    // Update existing record in place; keep its original id for stability
+    const existing = storage.addressBook[existingIndex];
+    storage.addressBook[existingIndex] = {
+      ...existing,
+      destination: recipient.destination,
+      phoneNumber: recipient.phoneNumber,
+      shippingAddress: recipient.shippingAddress,
+      deliveryTime: recipient.deliveryTime,
+      specialInstructions: recipient.specialInstructions,
+      lastUsed: now,
+    };
   } else {
-    storage.addressBook.push(updatedRecipient);
+    storage.addressBook.push({
+      ...recipient,
+      lastUsed: now,
+    });
   }
+
+  // Always dedupe on save to clean up any legacy duplicates retroactively
+  storage.addressBook = dedupeAddressBook(storage.addressBook);
 
   saveStorage(storage);
 };
