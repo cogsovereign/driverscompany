@@ -18,6 +18,7 @@ import {
   MapPin,
   Clock,
   FileText,
+  Printer,
 } from 'lucide-react';
 
 // --- Types for API response ---
@@ -80,6 +81,279 @@ const getCurrentMonth = (): string => {
 const formatCurrency = (amount: number): string => {
   return `€${amount.toFixed(2)}`;
 };
+
+const escapeHtml = (s: string | undefined | null): string => {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
+const formatMonthIT = (yyyymm: string): string => {
+  // input: "2026-05" -> "Maggio 2026"
+  const [y, m] = yyyymm.split('-');
+  const months = [
+    'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+    'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre',
+  ];
+  const idx = parseInt(m, 10) - 1;
+  if (idx < 0 || idx > 11) return yyyymm;
+  return `${months[idx]} ${y}`;
+};
+
+const buildPrintHtml = (
+  client: BillingClient,
+  costPerService: number,
+  monthLabel: string
+): string => {
+  const totalCost = client.deliveries * costPerService;
+  const today = new Date().toLocaleDateString('it-IT', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+
+  // Sort delivery details by date (most recent first)
+  const rows = [...(client.deliveryDetails || [])].sort((a, b) => {
+    const dateA = (a.date || '').split('/').reverse().join('');
+    const dateB = (b.date || '').split('/').reverse().join('');
+    return dateB.localeCompare(dateA);
+  });
+
+  const rowsHtml = rows
+    .map((d, i) => {
+      const richiesta = escapeHtml(d.date);
+      const ritiro = escapeHtml(d.pickupDate);
+      const studio = escapeHtml(d.studioName || '');
+      const indirizzoRitiro = escapeHtml((d.pickupAddress || '').replace(/\n/g, ', '));
+      const destinatario = escapeHtml(d.destination);
+      const indirizzoConsegna = escapeHtml((d.deliveryAddress || '').replace(/\n/g, ', '));
+      const note = escapeHtml(d.specialInstructions || '');
+      return `
+        <tr>
+          <td class="num">${i + 1}</td>
+          <td>${ritiro || richiesta}</td>
+          <td>
+            <div class="strong">${studio || '—'}</div>
+            <div class="small">${indirizzoRitiro}</div>
+          </td>
+          <td>
+            <div class="strong">${destinatario || '—'}</div>
+            <div class="small">${indirizzoConsegna}</div>
+            ${note ? `<div class="note">Note: ${note}</div>` : ''}
+          </td>
+          <td class="num">€ ${costPerService.toFixed(2)}</td>
+        </tr>`;
+    })
+    .join('');
+
+  const studiosLine = (client.studios || []).length > 0
+    ? `<div class="meta-row"><span class="meta-label">Studi collegati:</span> ${escapeHtml(client.studios!.join(', '))}</div>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>Riepilogo servizi ${escapeHtml(client.name)} - ${escapeHtml(monthLabel)}</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #1f2937;
+    margin: 0;
+    padding: 0;
+    font-size: 11pt;
+    line-height: 1.4;
+  }
+  .header {
+    border-bottom: 2px solid #1f2937;
+    padding-bottom: 10px;
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+  .brand {
+    font-size: 20pt;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .brand-sub {
+    font-size: 9pt;
+    color: #6b7280;
+    margin-top: 2px;
+  }
+  .doc-info {
+    text-align: right;
+    font-size: 9pt;
+    color: #4b5563;
+  }
+  h1 {
+    font-size: 16pt;
+    margin: 0 0 4px;
+  }
+  .meta {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+  }
+  .meta-row {
+    margin: 2px 0;
+    font-size: 10pt;
+  }
+  .meta-label {
+    color: #6b7280;
+    font-weight: 600;
+    display: inline-block;
+    min-width: 130px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 9.5pt;
+  }
+  thead {
+    display: table-header-group;
+  }
+  th {
+    background: #1f2937;
+    color: #ffffff;
+    text-align: left;
+    padding: 8px 10px;
+    font-weight: 600;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #e5e7eb;
+    vertical-align: top;
+  }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .strong { font-weight: 600; color: #111827; }
+  .small { color: #6b7280; font-size: 8.5pt; margin-top: 2px; }
+  .note { color: #92400e; font-size: 8pt; margin-top: 4px; font-style: italic; }
+  tfoot td {
+    border-top: 2px solid #1f2937;
+    border-bottom: none;
+    padding-top: 10px;
+    font-weight: 700;
+    font-size: 11pt;
+  }
+  .footer {
+    margin-top: 22px;
+    padding-top: 10px;
+    border-top: 1px solid #e5e7eb;
+    font-size: 8.5pt;
+    color: #6b7280;
+    text-align: center;
+  }
+  .print-btn {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    background: #2563eb;
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 6px;
+    font-size: 11pt;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+  .print-btn:hover { background: #1d4ed8; }
+  @media print {
+    .print-btn { display: none; }
+    body { font-size: 10pt; }
+  }
+</style>
+</head>
+<body>
+  <button class="print-btn" onclick="window.print()">Stampa / Salva come PDF</button>
+
+  <div class="header">
+    <div>
+      <div class="brand">DRIVERS COMPANY S.C.</div>
+      <div class="brand-sub">Via Oderzo 1, 33100 Udine · Tel 0432-526200</div>
+    </div>
+    <div class="doc-info">
+      <div>Documento generato il ${today}</div>
+      <div>Allegato alla fatturazione</div>
+    </div>
+  </div>
+
+  <h1>Riepilogo servizi — ${escapeHtml(client.name)}</h1>
+
+  <div class="meta">
+    <div class="meta-row"><span class="meta-label">Periodo:</span> ${escapeHtml(monthLabel)}</div>
+    <div class="meta-row"><span class="meta-label">Cliente / Committente:</span> <strong>${escapeHtml(client.name)}</strong></div>
+    ${studiosLine}
+    <div class="meta-row"><span class="meta-label">Servizi totali:</span> ${client.deliveries}</div>
+    <div class="meta-row"><span class="meta-label">Costo per servizio:</span> € ${costPerService.toFixed(2)}</div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        <th>Data ritiro</th>
+        <th>Da (studio)</th>
+        <th>Consegna a</th>
+        <th class="num">Importo</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rowsHtml}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="4" style="text-align: right;">TOTALE</td>
+        <td class="num">€ ${totalCost.toFixed(2)}</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <div class="footer">
+    Drivers Company S.C. · Logistica Professionale · driverscompanysc@gmail.com
+  </div>
+
+  <script>
+    // Auto-open print dialog after the page loads
+    window.addEventListener('load', () => {
+      setTimeout(() => window.print(), 300);
+    });
+  </script>
+</body>
+</html>`;
+};
+
+const handlePrintClient = (
+  client: BillingClient,
+  costPerService: number,
+  monthLabel: string
+): void => {
+  const html = buildPrintHtml(client, costPerService, monthLabel);
+  const w = window.open('', '_blank', 'width=900,height=1100');
+  if (!w) {
+    alert('Impossibile aprire la finestra di stampa. Controlla i popup del browser.');
+    return;
+  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+};
+
 
 // --- Component ---
 
@@ -340,11 +614,13 @@ export const AdminBilling: React.FC = () => {
                 </div>
               );
             }
+            const monthLabel = formatMonthIT(data.month || selectedMonth);
             return filtered.map((client, index) => (
               <ClientCard
                 key={`${client.name}-${index}`}
                 client={client}
                 costPerService={costPerService}
+                monthLabel={monthLabel}
               />
             ));
           })()}
@@ -394,7 +670,8 @@ const SummaryCard: React.FC<{
 const ClientCard: React.FC<{
   client: BillingClient;
   costPerService: number;
-}> = ({ client, costPerService }) => {
+  monthLabel: string;
+}> = ({ client, costPerService, monthLabel }) => {
   const totalCost = client.deliveries * costPerService;
   const [expanded, setExpanded] = useState(false);
 
@@ -416,6 +693,14 @@ const ClientCard: React.FC<{
             <p className="text-sm text-gray-500">{client.phone}</p>
           )}
         </div>
+        <button
+          onClick={() => handlePrintClient(client, costPerService, monthLabel)}
+          className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-3 py-1.5 rounded-lg transition-colors"
+          aria-label={`Stampa riepilogo ${client.name}`}
+        >
+          <Printer className="h-3.5 w-3.5" />
+          Stampa riepilogo
+        </button>
         {/* Stats Row */}
         <div className="flex items-center gap-4 mb-4">
           <div className="flex items-center gap-1.5 bg-green-50 text-green-700 px-3 py-1.5 rounded-lg text-sm font-semibold">
