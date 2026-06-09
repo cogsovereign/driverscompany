@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FormData, Recipient } from '../types/form';
 import { getSenderProfile, saveSenderProfile, saveRecipient } from '../services/localStorage';
 import { defaultStructuredHours } from '../../components/StudioHoursSelector';
 import {
   createNewRecipient,
+  createRequestId,
   initialFormData,
   normalizeCommittenteName,
 } from '../constants/formOptions';
@@ -31,6 +32,11 @@ const DentalLogisticsForm: React.FC = () => {
   const [adminAuthenticated, setAdminAuthenticated] = useState(false);
   const [adminView, setAdminView] = useState<'billing' | 'committenti'>('billing');
   const [cancellationRequestId, setCancellationRequestId] = useState('');
+
+  // Synchronous guard against double/triple-click submissions
+  const submittingRef = useRef(false);
+  // Persistent requestId per submission attempt - reused across retries to enable backend dedupe
+  const persistentRequestIdRef = useRef<string>('');
 
   // Load sender profile from localStorage on mount
   useEffect(() => {
@@ -227,21 +233,36 @@ const DentalLogisticsForm: React.FC = () => {
       return;
     }
 
-    console.log('🚀 Starting form submission...');
+    // Synchronous double-click guard (runs BEFORE React re-renders the disabled button)
+    if (submittingRef.current) {
+      console.log('⏭️ Ignoring duplicate submit click (already in progress)');
+      return;
+    }
+    submittingRef.current = true;
+
+    // Generate the requestId ONCE per submission attempt and reuse on retries.
+    // This enables backend dedupe: identical requestId from a double-submit
+    // can be safely ignored by the workflow.
+    if (!persistentRequestIdRef.current) {
+      persistentRequestIdRef.current = createRequestId();
+    }
+    const requestId = persistentRequestIdRef.current;
+
+    console.log('🚀 Starting form submission...', { requestId });
     setIsLoading(true);
-    
+
     try {
       console.log('📋 Form data to submit:', formData);
-      
+
       const n8nWebhookUrl = 'https://n8n.madani.agency/webhook/dental-logistics';
       console.log('📡 Sending to:', n8nWebhookUrl);
-      
+
       const response = await fetch(n8nWebhookUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({ ...formData, requestId }),
       });
 
       console.log('📥 Response status:', response.status);
@@ -288,6 +309,7 @@ const DentalLogisticsForm: React.FC = () => {
       alert(`Si è verificato un errore durante l'invio: ${errorMessage}\n\nControllare la console per dettagli.`);
     } finally {
       setIsLoading(false);
+      submittingRef.current = false;
     }
   };
 
@@ -297,6 +319,9 @@ const DentalLogisticsForm: React.FC = () => {
     setCurrentStep(1);
     setIsSubmitted(false);
     setValidationErrors({});
+    // Allow a fresh requestId for the next submission
+    persistentRequestIdRef.current = '';
+    submittingRef.current = false;
   };
 
   const handleBackToFormFromCancellation = () => {

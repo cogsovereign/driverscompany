@@ -24,6 +24,16 @@ export const normalizeCommittentiList = (names: string[]): string[] => {
   }, []);
 };
 
+export const createRequestId = (): string => {
+  // Crypto-safe randomness when available, fallback to Math.random for older browsers
+  const cryptoObj: Crypto | undefined =
+    typeof crypto !== 'undefined' ? crypto : undefined;
+  if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+    return `REQ_${cryptoObj.randomUUID().replace(/-/g, '').toUpperCase()}`;
+  }
+  return `REQ_${Date.now()}_${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+};
+
 export const createNewRecipient = () => ({
   id: Math.random().toString(36).slice(2, 11),
   destination: '',
