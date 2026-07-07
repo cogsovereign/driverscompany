@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -19,6 +19,7 @@ import {
   Clock,
   FileText,
   Printer,
+  Calendar,
 } from 'lucide-react';
 
 // --- Types for API response ---
@@ -62,6 +63,8 @@ interface BillingClient {
 
 interface BillingResponse {
   month: string;
+  startDate?: string;
+  endDate?: string;
   totalClients: number;
   totalDeliveries: number;
   totalPickups: number;
@@ -69,13 +72,29 @@ interface BillingResponse {
   clients: BillingClient[];
 }
 
+type PeriodPreset = 'month' | 'quarter' | 'semester' | 'year' | 'custom';
+
+interface PeriodRange {
+  startDate: string; // YYYY-MM-DD
+  endDate: string;   // YYYY-MM-DD
+  label: string;     // Human-readable label
+}
+
 // --- Helpers ---
+
+const MONTHS_IT = [
+  'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+  'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre',
+];
+
+const pad = (n: number): string => String(n).padStart(2, '0');
+
+const toISO = (d: Date): string =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
 const getCurrentMonth = (): string => {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
 };
 
 const formatCurrency = (amount: number): string => {
@@ -93,21 +112,86 @@ const escapeHtml = (s: string | undefined | null): string => {
 };
 
 const formatMonthIT = (yyyymm: string): string => {
-  // input: "2026-05" -> "Maggio 2026"
   const [y, m] = yyyymm.split('-');
-  const months = [
-    'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
-    'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre',
-  ];
   const idx = parseInt(m, 10) - 1;
   if (idx < 0 || idx > 11) return yyyymm;
-  return `${months[idx]} ${y}`;
+  return `${MONTHS_IT[idx]} ${y}`;
+};
+
+const formatDateITFromISO = (iso: string): string => {
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return iso;
+  return `${d}/${m}/${y}`;
+};
+
+const availableYears = (): number[] => {
+  const currentYear = new Date().getFullYear();
+  return [currentYear - 1, currentYear, currentYear + 1];
+};
+
+const computeRange = (
+  preset: PeriodPreset,
+  month: string,
+  year: number,
+  quarter: 1 | 2 | 3 | 4,
+  semester: 1 | 2,
+  customStart: string,
+  customEnd: string
+): PeriodRange => {
+  if (preset === 'month') {
+    const [y, m] = month.split('-').map(Number);
+    const start = new Date(y, m - 1, 1);
+    const end = new Date(y, m, 0);
+    return {
+      startDate: toISO(start),
+      endDate: toISO(end),
+      label: formatMonthIT(month),
+    };
+  }
+  if (preset === 'quarter') {
+    const startMonth = (quarter - 1) * 3;
+    const start = new Date(year, startMonth, 1);
+    const end = new Date(year, startMonth + 3, 0);
+    return {
+      startDate: toISO(start),
+      endDate: toISO(end),
+      label: `Trimestre ${quarter} ${year} (${MONTHS_IT[startMonth]}–${MONTHS_IT[startMonth + 2]})`,
+    };
+  }
+  if (preset === 'semester') {
+    const startMonth = (semester - 1) * 6;
+    const start = new Date(year, startMonth, 1);
+    const end = new Date(year, startMonth + 6, 0);
+    return {
+      startDate: toISO(start),
+      endDate: toISO(end),
+      label: `Semestre ${semester} ${year} (${MONTHS_IT[startMonth]}–${MONTHS_IT[startMonth + 5]})`,
+    };
+  }
+  if (preset === 'year') {
+    const start = new Date(year, 0, 1);
+    const end = new Date(year, 11, 31);
+    return {
+      startDate: toISO(start),
+      endDate: toISO(end),
+      label: `Anno ${year}`,
+    };
+  }
+  // custom
+  if (customStart && customEnd) {
+    return {
+      startDate: customStart,
+      endDate: customEnd,
+      label: `${formatDateITFromISO(customStart)} – ${formatDateITFromISO(customEnd)}`,
+    };
+  }
+  return { startDate: '', endDate: '', label: 'Personalizzato' };
 };
 
 const buildPrintHtml = (
   client: BillingClient,
   costPerService: number,
-  monthLabel: string
+  periodLabel: string
 ): string => {
   const totalCost = client.deliveries * costPerService;
   const today = new Date().toLocaleDateString('it-IT', {
@@ -116,7 +200,6 @@ const buildPrintHtml = (
     year: 'numeric',
   });
 
-  // Sort delivery details by date (most recent first)
   const rows = [...(client.deliveryDetails || [])].sort((a, b) => {
     const dateA = (a.date || '').split('/').reverse().join('');
     const dateB = (b.date || '').split('/').reverse().join('');
@@ -158,125 +241,33 @@ const buildPrintHtml = (
 <html lang="it">
 <head>
 <meta charset="UTF-8">
-<title>Riepilogo servizi ${escapeHtml(client.name)} - ${escapeHtml(monthLabel)}</title>
+<title>Riepilogo servizi ${escapeHtml(client.name)} - ${escapeHtml(periodLabel)}</title>
 <style>
   @page { size: A4; margin: 14mm 12mm; }
   * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    color: #1f2937;
-    margin: 0;
-    padding: 0;
-    font-size: 11pt;
-    line-height: 1.4;
-  }
-  .header {
-    border-bottom: 2px solid #1f2937;
-    padding-bottom: 10px;
-    margin-bottom: 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-  }
-  .brand {
-    font-size: 20pt;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-  }
-  .brand-sub {
-    font-size: 9pt;
-    color: #6b7280;
-    margin-top: 2px;
-  }
-  .doc-info {
-    text-align: right;
-    font-size: 9pt;
-    color: #4b5563;
-  }
-  h1 {
-    font-size: 16pt;
-    margin: 0 0 4px;
-  }
-  .meta {
-    background: #f9fafb;
-    border: 1px solid #e5e7eb;
-    border-radius: 6px;
-    padding: 10px 14px;
-    margin-bottom: 16px;
-  }
-  .meta-row {
-    margin: 2px 0;
-    font-size: 10pt;
-  }
-  .meta-label {
-    color: #6b7280;
-    font-weight: 600;
-    display: inline-block;
-    min-width: 130px;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 8px;
-    font-size: 9.5pt;
-  }
-  thead {
-    display: table-header-group;
-  }
-  th {
-    background: #1f2937;
-    color: #ffffff;
-    text-align: left;
-    padding: 8px 10px;
-    font-weight: 600;
-    font-size: 9pt;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-  }
-  td {
-    padding: 8px 10px;
-    border-bottom: 1px solid #e5e7eb;
-    vertical-align: top;
-  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; margin: 0; padding: 0; font-size: 11pt; line-height: 1.4; }
+  .header { border-bottom: 2px solid #1f2937; padding-bottom: 10px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: flex-end; }
+  .brand { font-size: 20pt; font-weight: 700; letter-spacing: 0.5px; }
+  .brand-sub { font-size: 9pt; color: #6b7280; margin-top: 2px; }
+  .doc-info { text-align: right; font-size: 9pt; color: #4b5563; }
+  h1 { font-size: 16pt; margin: 0 0 4px; }
+  .meta { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; }
+  .meta-row { margin: 2px 0; font-size: 10pt; }
+  .meta-label { color: #6b7280; font-weight: 600; display: inline-block; min-width: 130px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 9.5pt; }
+  thead { display: table-header-group; }
+  th { background: #1f2937; color: #ffffff; text-align: left; padding: 8px 10px; font-weight: 600; font-size: 9pt; text-transform: uppercase; letter-spacing: 0.3px; }
+  td { padding: 8px 10px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
   td.num, th.num { text-align: right; white-space: nowrap; }
   tr:nth-child(even) td { background: #fafbfc; }
   .strong { font-weight: 600; color: #111827; }
   .small { color: #6b7280; font-size: 8.5pt; margin-top: 2px; }
   .note { color: #92400e; font-size: 8pt; margin-top: 4px; font-style: italic; }
-  tfoot td {
-    border-top: 2px solid #1f2937;
-    border-bottom: none;
-    padding-top: 10px;
-    font-weight: 700;
-    font-size: 11pt;
-  }
-  .footer {
-    margin-top: 22px;
-    padding-top: 10px;
-    border-top: 1px solid #e5e7eb;
-    font-size: 8.5pt;
-    color: #6b7280;
-    text-align: center;
-  }
-  .print-btn {
-    position: fixed;
-    top: 12px;
-    right: 12px;
-    background: #2563eb;
-    color: white;
-    border: none;
-    padding: 10px 18px;
-    border-radius: 6px;
-    font-size: 11pt;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  }
+  tfoot td { border-top: 2px solid #1f2937; border-bottom: none; padding-top: 10px; font-weight: 700; font-size: 11pt; }
+  .footer { margin-top: 22px; padding-top: 10px; border-top: 1px solid #e5e7eb; font-size: 8.5pt; color: #6b7280; text-align: center; }
+  .print-btn { position: fixed; top: 12px; right: 12px; background: #2563eb; color: white; border: none; padding: 10px 18px; border-radius: 6px; font-size: 11pt; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
   .print-btn:hover { background: #1d4ed8; }
-  @media print {
-    .print-btn { display: none; }
-    body { font-size: 10pt; }
-  }
+  @media print { .print-btn { display: none; } body { font-size: 10pt; } }
 </style>
 </head>
 <body>
@@ -296,7 +287,7 @@ const buildPrintHtml = (
   <h1>Riepilogo servizi — ${escapeHtml(client.name)}</h1>
 
   <div class="meta">
-    <div class="meta-row"><span class="meta-label">Periodo:</span> ${escapeHtml(monthLabel)}</div>
+    <div class="meta-row"><span class="meta-label">Periodo:</span> ${escapeHtml(periodLabel)}</div>
     <div class="meta-row"><span class="meta-label">Cliente / Committente:</span> <strong>${escapeHtml(client.name)}</strong></div>
     ${studiosLine}
     <div class="meta-row"><span class="meta-label">Servizi totali:</span> ${client.deliveries}</div>
@@ -329,7 +320,6 @@ const buildPrintHtml = (
   </div>
 
   <script>
-    // Auto-open print dialog after the page loads
     window.addEventListener('load', () => {
       setTimeout(() => window.print(), 300);
     });
@@ -341,9 +331,9 @@ const buildPrintHtml = (
 const handlePrintClient = (
   client: BillingClient,
   costPerService: number,
-  monthLabel: string
+  periodLabel: string
 ): void => {
-  const html = buildPrintHtml(client, costPerService, monthLabel);
+  const html = buildPrintHtml(client, costPerService, periodLabel);
   const w = window.open('', '_blank', 'width=900,height=1100');
   if (!w) {
     alert('Impossibile aprire la finestra di stampa. Controlla i popup del browser.');
@@ -358,7 +348,21 @@ const handlePrintClient = (
 // --- Component ---
 
 export const AdminBilling: React.FC = () => {
+  const currentYear = new Date().getFullYear();
+
+  // Period selection state
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('month');
   const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentMonth());
+  const [selectedYear, setSelectedYear] = useState<number>(currentYear);
+  const [selectedQuarter, setSelectedQuarter] = useState<1 | 2 | 3 | 4>(
+    (Math.floor(new Date().getMonth() / 3) + 1) as 1 | 2 | 3 | 4
+  );
+  const [selectedSemester, setSelectedSemester] = useState<1 | 2>(
+    (new Date().getMonth() < 6 ? 1 : 2) as 1 | 2
+  );
+  const [customStart, setCustomStart] = useState<string>('');
+  const [customEnd, setCustomEnd] = useState<string>('');
+
   const [data, setData] = useState<BillingResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -366,6 +370,11 @@ export const AdminBilling: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [costPerService, setCostPerService] = useState(6.0);
   const [sortAlpha, setSortAlpha] = useState(true);
+
+  const range: PeriodRange = useMemo(
+    () => computeRange(periodPreset, selectedMonth, selectedYear, selectedQuarter, selectedSemester, customStart, customEnd),
+    [periodPreset, selectedMonth, selectedYear, selectedQuarter, selectedSemester, customStart, customEnd]
+  );
 
   // Load billing config from localStorage
   useEffect(() => {
@@ -375,20 +384,17 @@ export const AdminBilling: React.FC = () => {
     }
   }, []);
 
-  // Fetch billing data
-  const fetchBillingData = useCallback(async (month: string) => {
+  const fetchBillingData = useCallback(async (startDate: string, endDate: string) => {
+    if (!startDate || !endDate) return;
     setIsLoading(true);
     setError(null);
-
     try {
       const response = await fetch(
-        `https://n8n.madani.agency/webhook/dental-logistics-billing?month=${month}`
+        `https://n8n.madani.agency/webhook/dental-logistics-billing?startDate=${startDate}&endDate=${endDate}`
       );
-
       if (!response.ok) {
         throw new Error(`Errore HTTP: ${response.status}`);
       }
-
       const result: BillingResponse = await response.json();
       setData(result);
     } catch (err) {
@@ -401,12 +407,10 @@ export const AdminBilling: React.FC = () => {
     }
   }, []);
 
-  // Fetch on mount and when month changes
   useEffect(() => {
-    fetchBillingData(selectedMonth);
-  }, [selectedMonth, fetchBillingData]);
+    fetchBillingData(range.startDate, range.endDate);
+  }, [range.startDate, range.endDate, fetchBillingData]);
 
-  // Save cost config
   const handleSaveCostConfig = () => {
     const config: BillingConfig = {
       costPerDelivery: costPerService,
@@ -416,11 +420,30 @@ export const AdminBilling: React.FC = () => {
     saveBillingConfig(config);
   };
 
-  // --- Render: Loading ---
+  const periodSelector = (
+    <PeriodSelector
+      preset={periodPreset}
+      onPresetChange={setPeriodPreset}
+      selectedMonth={selectedMonth}
+      onMonthChange={setSelectedMonth}
+      selectedYear={selectedYear}
+      onYearChange={setSelectedYear}
+      selectedQuarter={selectedQuarter}
+      onQuarterChange={setSelectedQuarter}
+      selectedSemester={selectedSemester}
+      onSemesterChange={setSelectedSemester}
+      customStart={customStart}
+      onCustomStartChange={setCustomStart}
+      customEnd={customEnd}
+      onCustomEndChange={setCustomEnd}
+      periodLabel={range.label}
+    />
+  );
+
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <MonthSelector value={selectedMonth} onChange={setSelectedMonth} />
+        {periodSelector}
         <div className="flex flex-col items-center justify-center py-20">
           <div className="h-10 w-10 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
           <p className="mt-4 text-gray-500 font-medium">
@@ -431,11 +454,10 @@ export const AdminBilling: React.FC = () => {
     );
   }
 
-  // --- Render: Error ---
   if (error) {
     return (
       <div className="space-y-6">
-        <MonthSelector value={selectedMonth} onChange={setSelectedMonth} />
+        {periodSelector}
         <Card className="bg-white shadow-xl border-0 rounded-2xl overflow-hidden">
           <CardContent className="p-10 text-center">
             <AlertCircle className="h-12 w-12 text-red-400 mx-auto mb-4" />
@@ -444,7 +466,7 @@ export const AdminBilling: React.FC = () => {
             </h3>
             <p className="text-gray-500 mb-6">{error}</p>
             <Button
-              onClick={() => fetchBillingData(selectedMonth)}
+              onClick={() => fetchBillingData(range.startDate, range.endDate)}
               className="bg-blue-600 hover:bg-blue-700 text-white rounded-xl px-6 h-11"
             >
               <RefreshCw className="h-4 w-4 mr-2" />
@@ -456,11 +478,10 @@ export const AdminBilling: React.FC = () => {
     );
   }
 
-  // --- Render: Empty ---
   if (!data || data.totalClients === 0) {
     return (
       <div className="space-y-6">
-        <MonthSelector value={selectedMonth} onChange={setSelectedMonth} />
+        {periodSelector}
         <Card className="bg-white shadow-xl border-0 rounded-2xl overflow-hidden">
           <CardContent className="p-10 text-center">
             <Package className="h-12 w-12 text-gray-300 mx-auto mb-4" />
@@ -468,7 +489,7 @@ export const AdminBilling: React.FC = () => {
               Nessun dato disponibile
             </h3>
             <p className="text-gray-500">
-              Non ci sono dati di fatturazione per il mese selezionato.
+              Non ci sono dati di fatturazione per il periodo selezionato.
             </p>
           </CardContent>
         </Card>
@@ -476,15 +497,12 @@ export const AdminBilling: React.FC = () => {
     );
   }
 
-  // --- Render: Dashboard ---
   const totalRevenue = data.totalDeliveries * costPerService;
 
   return (
     <div className="space-y-6">
-      {/* Month Selector */}
-      <MonthSelector value={selectedMonth} onChange={setSelectedMonth} />
+      {periodSelector}
 
-      {/* Summary Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <SummaryCard
           icon={<Building2 className="h-6 w-6 text-blue-600" />}
@@ -508,9 +526,7 @@ export const AdminBilling: React.FC = () => {
           borderClass="border-orange-100"
         />
         <SummaryCard
-          icon={
-            <span className="text-lg font-bold text-purple-600">€</span>
-          }
+          icon={<span className="text-lg font-bold text-purple-600">€</span>}
           value={formatCurrency(totalRevenue)}
           label="Imponibile Totale"
           bgClass="bg-purple-50"
@@ -518,7 +534,6 @@ export const AdminBilling: React.FC = () => {
         />
       </div>
 
-      {/* Cost Configuration Toggle */}
       <div className="flex justify-end">
         <Button
           variant="outline"
@@ -531,7 +546,6 @@ export const AdminBilling: React.FC = () => {
         </Button>
       </div>
 
-      {/* Cost Configuration Panel */}
       {showConfig && (
         <Card className="bg-white shadow-lg border-0 rounded-2xl overflow-hidden">
           <CardContent className="p-6">
@@ -569,7 +583,6 @@ export const AdminBilling: React.FC = () => {
         </Card>
       )}
 
-      {/* Client Cards */}
       <div className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -614,13 +627,12 @@ export const AdminBilling: React.FC = () => {
                 </div>
               );
             }
-            const monthLabel = formatMonthIT(data.month || selectedMonth);
             return filtered.map((client, index) => (
               <ClientCard
                 key={`${client.name}-${index}`}
                 client={client}
                 costPerService={costPerService}
-                monthLabel={monthLabel}
+                periodLabel={range.label}
               />
             ));
           })()}
@@ -632,19 +644,180 @@ export const AdminBilling: React.FC = () => {
 
 // --- Sub-Components ---
 
-const MonthSelector: React.FC<{
-  value: string;
-  onChange: (value: string) => void;
+const PeriodSelector: React.FC<{
+  preset: PeriodPreset;
+  onPresetChange: (preset: PeriodPreset) => void;
+  selectedMonth: string;
+  onMonthChange: (month: string) => void;
+  selectedYear: number;
+  onYearChange: (year: number) => void;
+  selectedQuarter: 1 | 2 | 3 | 4;
+  onQuarterChange: (q: 1 | 2 | 3 | 4) => void;
+  selectedSemester: 1 | 2;
+  onSemesterChange: (s: 1 | 2) => void;
+  customStart: string;
+  onCustomStartChange: (s: string) => void;
+  customEnd: string;
+  onCustomEndChange: (s: string) => void;
+  periodLabel: string;
+}> = ({
+  preset,
+  onPresetChange,
+  selectedMonth,
+  onMonthChange,
+  selectedYear,
+  onYearChange,
+  selectedQuarter,
+  onQuarterChange,
+  selectedSemester,
+  onSemesterChange,
+  customStart,
+  onCustomStartChange,
+  customEnd,
+  onCustomEndChange,
+  periodLabel,
+}) => {
+  const presets: { key: PeriodPreset; label: string }[] = [
+    { key: 'month', label: 'Mese' },
+    { key: 'quarter', label: 'Trimestre' },
+    { key: 'semester', label: 'Semestre' },
+    { key: 'year', label: 'Anno' },
+    { key: 'custom', label: 'Personalizzato' },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h2 className="text-2xl font-bold text-gray-900">Fatturazione</h2>
+        <div className="flex items-center gap-2 text-sm text-gray-600 bg-blue-50 border border-blue-100 rounded-lg px-3 py-1.5">
+          <Calendar className="h-4 w-4 text-blue-600" />
+          <span className="font-medium">{periodLabel}</span>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm">
+        <div className="flex flex-wrap gap-2 mb-3">
+          {presets.map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              onClick={() => onPresetChange(p.key)}
+              className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
+                preset === p.key
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {preset === 'month' && (
+          <div className="flex items-center gap-3">
+            <label className="text-sm font-medium text-gray-700">Mese:</label>
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => onMonthChange(e.target.value)}
+              className="rounded-xl border-2 border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-all"
+            />
+          </div>
+        )}
+
+        {preset === 'quarter' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-sm font-medium text-gray-700">Trimestre:</label>
+            <div className="flex gap-1">
+              {[1, 2, 3, 4].map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => onQuarterChange(q as 1 | 2 | 3 | 4)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
+                    selectedQuarter === q
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
+                  }`}
+                >
+                  T{q}
+                </button>
+              ))}
+            </div>
+            <YearSelector value={selectedYear} onChange={onYearChange} />
+          </div>
+        )}
+
+        {preset === 'semester' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-sm font-medium text-gray-700">Semestre:</label>
+            <div className="flex gap-1">
+              {[1, 2].map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => onSemesterChange(s as 1 | 2)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
+                    selectedSemester === s
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200'
+                  }`}
+                >
+                  {s === 1 ? 'S1 (Gen–Giu)' : 'S2 (Lug–Dic)'}
+                </button>
+              ))}
+            </div>
+            <YearSelector value={selectedYear} onChange={onYearChange} />
+          </div>
+        )}
+
+        {preset === 'year' && (
+          <div className="flex items-center gap-3">
+            <label className="text-sm font-medium text-gray-700">Anno:</label>
+            <YearSelector value={selectedYear} onChange={onYearChange} />
+          </div>
+        )}
+
+        {preset === 'custom' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">Dal:</label>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => onCustomStartChange(e.target.value)}
+                className="rounded-xl border-2 border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">Al:</label>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => onCustomEndChange(e.target.value)}
+                className="rounded-xl border-2 border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const YearSelector: React.FC<{
+  value: number;
+  onChange: (year: number) => void;
 }> = ({ value, onChange }) => (
-  <div className="flex items-center justify-between">
-    <h2 className="text-2xl font-bold text-gray-900">Fatturazione</h2>
-    <input
-      type="month"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="rounded-xl border-2 border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-all duration-200"
-    />
-  </div>
+  <select
+    value={value}
+    onChange={(e) => onChange(parseInt(e.target.value, 10))}
+    className="rounded-xl border-2 border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+  >
+    {availableYears().map((y) => (
+      <option key={y} value={y}>{y}</option>
+    ))}
+  </select>
 );
 
 const SummaryCard: React.FC<{
@@ -670,15 +843,14 @@ const SummaryCard: React.FC<{
 const ClientCard: React.FC<{
   client: BillingClient;
   costPerService: number;
-  monthLabel: string;
-}> = ({ client, costPerService, monthLabel }) => {
+  periodLabel: string;
+}> = ({ client, costPerService, periodLabel }) => {
   const totalCost = client.deliveries * costPerService;
   const [expanded, setExpanded] = useState(false);
 
   return (
     <Card className="bg-white shadow-lg border-0 rounded-2xl overflow-hidden hover:shadow-xl transition-shadow duration-200">
       <CardContent className="p-5">
-        {/* Client Header */}
         <div className="mb-4">
           <h3 className="text-base font-bold text-gray-900">{client.name}</h3>
           {client.studios && client.studios.length > 0 && (
@@ -694,14 +866,13 @@ const ClientCard: React.FC<{
           )}
         </div>
         <button
-          onClick={() => handlePrintClient(client, costPerService, monthLabel)}
+          onClick={() => handlePrintClient(client, costPerService, periodLabel)}
           className="inline-flex items-center gap-1.5 mb-3 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-3 py-1.5 rounded-lg transition-colors"
           aria-label={`Stampa riepilogo ${client.name}`}
         >
           <Printer className="h-3.5 w-3.5" />
           Stampa riepilogo
         </button>
-        {/* Stats Row */}
         <div className="flex items-center gap-4 mb-4">
           <div className="flex items-center gap-1.5 bg-green-50 text-green-700 px-3 py-1.5 rounded-lg text-sm font-semibold">
             <Package className="h-3.5 w-3.5" />
@@ -713,7 +884,6 @@ const ClientCard: React.FC<{
           </div>
         </div>
 
-        {/* Cost */}
         <div className="flex items-center justify-between py-3 border-t border-gray-100">
           <span className="text-sm text-gray-500 font-medium">
             Totale dovuto
@@ -723,7 +893,6 @@ const ClientCard: React.FC<{
           </span>
         </div>
 
-        {/* Expandable Delivery Details */}
         {client.deliveryDetails && client.deliveryDetails.length > 0 && (
           <div className="pt-3 border-t border-gray-100">
             <button
@@ -774,7 +943,6 @@ const ClientCard: React.FC<{
                       </div>
                     </div>
                   ))}
-                {/* Consegne (green) */}
                 {client.deliveryDetails.map((detail, i) => (
                   <div
                     key={detail.id || i}
