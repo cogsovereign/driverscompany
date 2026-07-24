@@ -146,13 +146,15 @@ export const saveRecipient = (recipient: SavedRecipient): void => {
   if (existingIndex >= 0) {
     // Update existing record in place; keep its original id for stability
     const existing = storage.addressBook[existingIndex];
+    const preferNonEmpty = (next: string, prev: string): string =>
+      (next || '').trim() ? next : (prev || '');
     storage.addressBook[existingIndex] = {
       ...existing,
       destination: recipient.destination,
-      phoneNumber: recipient.phoneNumber,
       shippingAddress: recipient.shippingAddress,
-      deliveryTime: recipient.deliveryTime,
-      specialInstructions: recipient.specialInstructions,
+      phoneNumber: preferNonEmpty(recipient.phoneNumber, existing.phoneNumber),
+      deliveryTime: preferNonEmpty(recipient.deliveryTime, existing.deliveryTime),
+      specialInstructions: preferNonEmpty(recipient.specialInstructions, existing.specialInstructions),
       lastUsed: now,
     };
   } else {
